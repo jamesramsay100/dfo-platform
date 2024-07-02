@@ -1,0 +1,50 @@
+version: '3.7'
+
+services:
+  minio:
+    image: minio/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: iceberg
+      POSTGRES_PASSWORD: icebergpw
+      POSTGRES_DB: iceberg
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  trino:
+    image: trinodb/trino:419
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino-config:/etc/trino
+      - trino-data:/data/trino
+    environment:
+      - JAVA_VERSION=17
+    depends_on:
+      - minio
+      - postgres
+
+  jupyter:
+    image: jupyter/scipy-notebook
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+
+volumes:
+  minio-data:
+  postgres-data:
+  trino-data:
