@@ -1,74 +1,67 @@
 version: "3"
 
 services:
-  spark-iceberg:
-    image: tabulario/spark-iceberg
-    container_name: spark-iceberg
-    build: spark/
+  catalog:
+    image: projectnessie/nessie
+    container_name: catalog
     networks:
-      iceberg_net:
-    depends_on:
-      - rest
-      - minio
-    volumes:
-      - ./warehouse:/home/iceberg/warehouse
-      - ./notebooks:/home/iceberg/notebooks/notebooks
-    environment:
-      - AWS_ACCESS_KEY_ID=admin
-      - AWS_SECRET_ACCESS_KEY=password
-      - AWS_REGION=us-east-1
+      iceberg-nessie-net:
     ports:
-      - 8888:8888
+      - 19120:19120
+
+  trino:
+    image: trinodb/trino
+    container_name: trino
+    networks:
+      iceberg-nessie-net:
+    ports:
       - 8080:8080
-      - 10000:10000
-      - 10001:10001
-  rest:
-    image: tabulario/iceberg-rest
-    container_name: iceberg-rest
-    networks:
-      iceberg_net:
-    ports:
-      - 8181:8181
-    environment:
-      - AWS_ACCESS_KEY_ID=admin
-      - AWS_SECRET_ACCESS_KEY=password
-      - AWS_REGION=us-east-1
-      - CATALOG_WAREHOUSE=s3://warehouse/
-      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
-      - CATALOG_S3_ENDPOINT=http://minio:9000
-  minio:
+    volumes:
+      - "./example.properties:/etc/trino/catalog/example.properties"
+      - "./post-init.sh:/tmp/post-init.sh"
+      - "./post-init.sql:/tmp/post-init.sql"
+    command: [ "/bin/sh", "-c", "chmod +x /tmp/post-init.sh && /tmp/post-init.sh" ]
+
+  storage:
     image: minio/minio
-    container_name: minio
+    container_name: storage
     environment:
       - MINIO_ROOT_USER=admin
       - MINIO_ROOT_PASSWORD=password
-      - MINIO_DOMAIN=minio
+      - MINIO_DOMAIN=storage
+      - MINIO_REGION_NAME=us-east-1
+      - MINIO_REGION=us-east-1
     networks:
-      iceberg_net:
-        aliases:
-          - warehouse.minio
+      iceberg-nessie-net:
     ports:
       - 9001:9001
       - 9000:9000
     command: ["server", "/data", "--console-address", ":9001"]
+  # Minio Client Container
   mc:
     depends_on:
-      - minio
+      - storage
     image: minio/mc
     container_name: mc
     networks:
-      iceberg_net:
+      iceberg-nessie-net:
+        aliases:
+          - minio.storage
     environment:
       - AWS_ACCESS_KEY_ID=admin
       - AWS_SECRET_ACCESS_KEY=password
       - AWS_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
     entrypoint: >
       /bin/sh -c "
-      until (/usr/bin/mc config host add minio http://minio:9000 admin password) do echo '...waiting...' && sleep 1; done;
+      until (/usr/bin/mc config host add minio http://storage:9000 admin password) do echo '...waiting...' && sleep 1; done;
       /usr/bin/mc rm -r --force minio/warehouse;
       /usr/bin/mc mb minio/warehouse;
+      /usr/bin/mc mb minio/iceberg;
       /usr/bin/mc policy set public minio/warehouse;
+      /usr/bin/mc policy set public minio/iceberg;
       tail -f /dev/null
-      "
+      " 
+
 networks:
-  iceberg_net:
+  iceberg-nessie-net:
