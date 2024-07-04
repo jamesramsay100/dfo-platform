@@ -63,5 +63,20 @@ services:
       tail -f /dev/null
       " 
 
+  jupyter:
+    build:
+      context: ./jupyter
+      dockerfile: Dockerfile
+    container_name: jupyter
+    networks:
+      iceberg-nessie-net:
+    ports:
+      - 8888:8888
+    volumes:
+      - ./notebooks:/home/jovyan/work
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+    command: start.sh jupyter lab --NotebookApp.token=''
+
 networks:
   iceberg-nessie-net:
