@@ -1,9 +1,11 @@
 #!/bin/bash
 
-nohup /usr/lib/trino/bin/run-trino &
+#nohup /usr/lib/trino/bin/run-trino &
+#
+#sleep 10
 
-sleep 10
+echo "Beginning initialisation..."
 
 trino < /tmp/post-init.sql
 
-tail -f /dev/null
+echo "Tables and schemas initialised..."

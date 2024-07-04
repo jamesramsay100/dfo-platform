@@ -20,7 +20,7 @@ services:
       - "./example.properties:/etc/trino/catalog/example.properties"
       - "./post-init.sh:/tmp/post-init.sh"
       - "./post-init.sql:/tmp/post-init.sql"
-    command: [ "/bin/sh", "-c", "chmod +x /tmp/post-init.sh && /tmp/post-init.sh" ]
+#    command: [ "/bin/sh", "-c", "chmod +x /tmp/post-init.sh && /tmp/post-init.sh" ]
 
   storage:
     image: minio/minio
