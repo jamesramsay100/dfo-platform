@@ -78,5 +78,20 @@ services:
       - JUPYTER_ENABLE_LAB=yes
     command: start.sh jupyter lab --NotebookApp.token=''
 
+  jupyter-pyspark:
+    build:
+      context: ./jupyter-pyspark
+      dockerfile: Dockerfile
+    container_name: jupyter-pyspark
+    networks:
+      iceberg-nessie-net:
+    ports:
+      - 8889:8888
+    volumes:
+      - ./notebooks:/home/jovyan/work
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+    command: start.sh jupyter lab --NotebookApp.token=''
+
 networks:
   iceberg-nessie-net:
