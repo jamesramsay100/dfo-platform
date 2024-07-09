@@ -22,6 +22,7 @@ services:
       - 8080:8080
       - 10000:10000
       - 10001:10001
+
   rest:
     image: tabulario/iceberg-rest
     container_name: iceberg-rest
@@ -36,6 +37,7 @@ services:
       - CATALOG_WAREHOUSE=s3://warehouse/
       - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
       - CATALOG_S3_ENDPOINT=http://minio:9000
+
   minio:
     image: minio/minio
     container_name: minio
@@ -51,6 +53,7 @@ services:
       - 9001:9001
       - 9000:9000
     command: ["server", "/data", "--console-address", ":9001"]
+
   mc:
     depends_on:
       - minio
@@ -70,5 +73,15 @@ services:
       /usr/bin/mc policy set public minio/warehouse;
       tail -f /dev/null
       "
+  trino:
+    image: trinodb/trino
+    container_name: trino
+    networks:
+      iceberg_net:
+    ports:
+      - 9080:8080
+    volumes:
+      - "./demo.properties:/etc/trino/catalog/demo.properties"
+
 networks:
   iceberg_net:
