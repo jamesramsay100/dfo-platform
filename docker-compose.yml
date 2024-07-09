@@ -83,5 +83,22 @@ services:
     volumes:
       - "./demo.properties:/etc/trino/catalog/demo.properties"
 
+  fbe-generator:
+    build:
+      context: ./fbe-generator
+      dockerfile: Dockerfile
+    container_name: fbe-generator
+    networks:
+      - iceberg_net
+    depends_on:
+      - minio
+    environment:
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - MAX_DEPTH=100
+      - SENSOR_NAME=sensor1
+      - ASSET_NAME=asset1
+      - WELL_NAME=well1
+
 networks:
   iceberg_net:
