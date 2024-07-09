@@ -1,2 +1,0 @@
-trino
-pandas
