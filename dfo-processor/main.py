@@ -1,8 +1,6 @@
 import os
 import time
-from datetime import datetime
 from pyiceberg.catalog import load_catalog
-from pyiceberg.types import TimestampType, StringType, LongType, DoubleType
 from pyiceberg.schema import Schema
 from pyiceberg.types import (
     TimestampType,
@@ -11,9 +9,6 @@ from pyiceberg.types import (
     DoubleType,
     NestedField
 )
-from pyiceberg.partitioning import PartitionSpec, PartitionField
-from pyiceberg.transforms import DayTransform, IdentityTransform
-from pyiceberg.table.sorting import SortOrder, SortField
 import pandas as pd
 import pyarrow as pa
 from datetime import datetime
