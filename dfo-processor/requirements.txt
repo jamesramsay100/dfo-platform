@@ -1,0 +1,4 @@
+pyiceberg[s3fs,s3]
+pandas
+minio
+pyarrow
