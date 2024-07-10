@@ -1,9 +1,9 @@
+# Start up
 ```shell
 docker-compose up -d
 ```
 
-
-## Spark setup
+## [NOT USED] Spark setup
 Create a table using demo nyc taxi data
 
 Launch "Iceberg Getting Started notebook" via http://localhost:8888/
@@ -27,16 +27,24 @@ docker-compose exec -it trino trino
 Run some SQL commands:
 ```sql
 SELECT 
-    count(*) 
+    max(timestamp) 
 FROM 
-    demo.nyc.taxis;
+    demo.silver.dfo;
 ```
 ```sql
 SELECT 
-    payment_type as "Payment Type",
-    avg(passenger_count) as "Average passenger count"
+    distance as "Distance",
+    avg(value) as "RMS0 average"
 FROM 
-    demo.nyc.taxis 
+    demo.silver.dfo 
+WHERE
+    distance < 10
+AND
+    timestamp >= now() - interval '5' minute
+AND
+    measurement = 'RMS0'
 GROUP BY 
-    payment_type;
+    distance
+ORDER BY
+    distance;
 ```
