@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime
 from pyiceberg.catalog import load_catalog
 from pyiceberg.types import TimestampType, StringType, LongType, DoubleType
 from pyiceberg.schema import Schema
@@ -91,7 +92,7 @@ def ensure_bucket_exists(bucket_name):
 def process_csv(object_name):
     # Download CSV from MinIO
     response = minio_client.get_object("dfo-bucket", object_name)
-    print(f"loaded minio file {response}")
+    print(f"Loaded minio file {object_name}...")
     df = pd.read_csv(response)
 
     # Extract timestamp and sensor_name from filename
@@ -142,10 +143,32 @@ def move_to_archive(object_name):
         # Remove object from original bucket
         minio_client.remove_object("dfo-bucket", object_name)
 
-        print(f"Moved {object_name} to archive bucket")
+        print(f"Moved {object_name} to archive bucket...")
     except S3Error as e:
         print(f"Error moving file to archive: {e}")
         raise
+
+
+def process_all_csv_files(minio_client):
+    all_data = []
+    files_to_archive = []
+    objects = minio_client.list_objects("dfo-bucket", recursive=True)
+
+    for obj in objects:
+        if obj.object_name.endswith(".csv"):
+            print(f"Processing {obj.object_name}...")
+            df = process_csv(obj.object_name)
+            all_data.append(df)
+            files_to_archive.append(obj.object_name)
+
+    if all_data:
+        return pd.concat(all_data, ignore_index=True), files_to_archive
+    return None, []
+
+
+def archive_processed_files(minio_client, files_to_archive):
+    for file_name in files_to_archive:
+        move_to_archive(file_name)
 
 
 def main():
@@ -153,37 +176,36 @@ def main():
 
     while True:
         try:
-            new_files = False
-            for obj in minio_client.list_objects("dfo-bucket", recursive=True):
-                if obj.object_name.endswith(".csv"):
-                    print(f"Processing {obj.object_name}")
-                    df = process_csv(obj.object_name)
+            start_time = time.time()
 
-                    # Ensure correct data types
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
-                    df['distance'] = df['distance'].astype('int64')
-                    df['value'] = df['value'].astype('float64')
+            # Process all CSV files
+            combined_df, files_to_archive = process_all_csv_files(minio_client)
 
-                    print(df.head())
-                    print(df.dtypes)
+            if combined_df is not None:
+                # Ensure correct data types
+                combined_df['timestamp'] = pd.to_datetime(combined_df['timestamp'])
+                combined_df['distance'] = combined_df['distance'].astype('int64')
+                combined_df['value'] = combined_df['value'].astype('float64')
 
-                    # Convert to PyArrow table
-                    tb = pa.Table.from_pandas(df, schema=pa_schema)
-                    print("converted to pa")
+                # Convert to PyArrow table
+                tb = pa.Table.from_pandas(combined_df, schema=pa_schema)
+                # print("Converted to PyArrow table")
 
-                    # Append to Iceberg table
-                    table.append(tb)
+                # Append to Iceberg table
+                table.append(tb)
+                # print("Appended data to Iceberg table")
 
-                    # Move processed file to archive
-                    move_to_archive(obj.object_name)
+                # Move processed files to archive
+                archive_processed_files(minio_client, files_to_archive)
+                print(f"Moved {len(files_to_archive)} files to archive...")
 
-                    new_files = True
-
-            if new_files:
-                print("Batch processing complete. Sleeping for 5 seconds.")
+                end_time = time.time()
+                processing_time = end_time - start_time
+                print(f"Batch processing complete. Time taken: {processing_time:.2f} seconds for {len(files_to_archive)} files...")
             else:
-                print("No new files found. Sleeping for 5 seconds.")
+                print("No new files found...")
 
+            print("Sleeping for 5 seconds...")
             time.sleep(5)
 
         except Exception as e:
