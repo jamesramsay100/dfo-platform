@@ -67,6 +67,34 @@ class CentroidSpreadExtractor(FeatureExtractor):
         return {'centroid': centroids, 'spread': spreads}
 
 
+class RMSFrequencyBinExtractor(FeatureExtractor):
+    def extract(self, data: np.ndarray, rate: float, **kwargs) -> Dict[str, np.ndarray]:
+        window_size = kwargs.get('window_size', 1.0)
+        freq_bins = kwargs.get('freq_bins', [(1, 5), (5, 10), (10, 20)])
+
+        samples_per_window = int(window_size * rate)
+        num_windows = data.shape[0] // samples_per_window
+        num_channels = data.shape[1]
+        num_bins = len(freq_bins)
+
+        rms_amplitudes = np.zeros((num_windows, num_channels, num_bins))
+
+        freqs = np.fft.rfftfreq(samples_per_window, 1 / rate)
+
+        for window in range(num_windows):
+            start = window * samples_per_window
+            end = start + samples_per_window
+            window_data = data[start:end, :]
+
+            fft_data = np.abs(np.fft.rfft(window_data, axis=0))
+
+            for bin_idx, (low_freq, high_freq) in enumerate(freq_bins):
+                bin_mask = (freqs >= low_freq) & (freqs < high_freq)
+                bin_data = fft_data[bin_mask, :]
+                rms_amplitudes[window, :, bin_idx] = np.sqrt(np.mean(bin_data ** 2, axis=0))
+
+        return {f'rms_bin_{low}_{high}': rms_amplitudes[:, :, i] for i, (low, high) in enumerate(freq_bins)}
+
 class FeatureSaver(ABC):
     @abstractmethod
     def save(self, features: Dict[str, np.ndarray], file_path: str):
@@ -149,12 +177,16 @@ class DAS:
 if __name__ == "__main__":
 
     path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/0000000005_2024-07-03_09.30.30.84400.hdf5'
+    window_size=15
 
     das = DAS()
     das.load_raw_data(path)
 
     centroid_spread_extractor = CentroidSpreadExtractor()
-    das.extract_features(centroid_spread_extractor, window_size=1.0, normalize=True)
+    das.extract_features(centroid_spread_extractor, window_size=window_size, normalize=True)
+
+    rms_extractor = RMSFrequencyBinExtractor()
+    das.extract_features(rms_extractor, window_size=window_size, freq_bins=[(1, 5), (5, 10), (500, 1000)])
 
     # das.save_features("path/to/save/features.npz")
 
@@ -165,9 +197,9 @@ if __name__ == "__main__":
 
     # Plot the centroid feature
     das.plot_features(
-        ['centroid', 'spread'],
+        ['centroid', 'spread', 'rms_bin_1_5', 'rms_bin_5_10', 'rms_bin_500_1000'],
         channel_start=0,
-        channel_end=600,
+        channel_end=2000,
         time_start=0,
         time_end=30,
         figsize=(12, 8)
