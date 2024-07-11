@@ -1,0 +1,174 @@
+import h5py
+import numpy as np
+from scipy.fft import rfft
+from typing import Tuple, Optional, Dict, Any, List
+from abc import ABC, abstractmethod
+import matplotlib.pyplot as plt
+
+
+class DASFileLoader(ABC):
+    @abstractmethod
+    def load(self, file_path: str) -> Tuple[np.ndarray, float]:
+        pass
+
+
+class StandardH5Loader(DASFileLoader):
+    def load(self, file_path: str) -> Tuple[np.ndarray, float]:
+        with h5py.File(file_path, 'r') as h5_file:
+            das_data = h5_file.get('DAS')[:]
+            rate = h5_file.get('DAS').attrs['Rate'][0]
+        return das_data, rate
+
+
+class FeatureExtractor(ABC):
+    @abstractmethod
+    def extract(self, data: np.ndarray, rate: float, **kwargs) -> Dict[str, np.ndarray]:
+        pass
+
+
+class CentroidSpreadExtractor(FeatureExtractor):
+    def extract(self, data: np.ndarray, rate: float, **kwargs) -> Dict[str, np.ndarray]:
+        window_size = kwargs.get('window_size', 1.0)
+        normalize = kwargs.get('normalize', False)
+        freq_range = kwargs.get('freq_range', None)
+
+        samples_per_window = int(window_size * rate)
+        num_windows = data.shape[0] // samples_per_window
+        num_channels = data.shape[1]
+
+        centroids = np.zeros((num_windows, num_channels))
+        spreads = np.zeros((num_windows, num_channels))
+
+        freqs = np.fft.rfftfreq(samples_per_window, 1 / rate)
+
+        if freq_range:
+            freq_mask = (freqs >= freq_range[0]) & (freqs <= freq_range[1])
+        else:
+            freq_mask = np.ones_like(freqs, dtype=bool)
+
+        masked_freqs = freqs[freq_mask]
+
+        for window in range(num_windows):
+            start = window * samples_per_window
+            end = start + samples_per_window
+            window_data = data[start:end, :]
+
+            if normalize:
+                window_data = (window_data - np.mean(window_data, axis=0)) / np.std(window_data, axis=0)
+
+            fft_data = np.abs(np.fft.rfft(window_data, axis=0))
+            masked_fft = fft_data[freq_mask, :]
+
+            total_power = np.sum(masked_fft, axis=0)
+            centroids[window] = np.sum(masked_freqs[:, np.newaxis] * masked_fft, axis=0) / total_power
+            spreads[window] = np.sqrt(
+                np.sum(((masked_freqs[:, np.newaxis] - centroids[window]) ** 2) * masked_fft, axis=0) / total_power)
+
+        return {'centroid': centroids, 'spread': spreads}
+
+
+class FeatureSaver(ABC):
+    @abstractmethod
+    def save(self, features: Dict[str, np.ndarray], file_path: str):
+        pass
+
+
+class NpzSaver(FeatureSaver):
+    def save(self, features: Dict[str, np.ndarray], file_path: str):
+        np.savez(file_path, **features)
+
+
+class DAS:
+    def __init__(self, file_loader: DASFileLoader = StandardH5Loader()):
+        self.das_data: Optional[np.ndarray] = None
+        self.rate: Optional[float] = None
+        self.extracted_features: Dict[str, np.ndarray] = {}
+        self.file_loader = file_loader
+
+    def load_raw_data(self, file_path: str):
+        self.das_data, self.rate = self.file_loader.load(file_path)
+
+    def extract_features(self, extractor: FeatureExtractor, **kwargs):
+        if self.das_data is None or self.rate is None:
+            raise ValueError("Raw data not loaded. Call load_raw_data() first.")
+
+        features = extractor.extract(self.das_data, self.rate, **kwargs)
+        self.extracted_features.update(features)
+
+    def save_features(self, file_path: str, saver: FeatureSaver = NpzSaver()):
+        if not self.extracted_features:
+            raise ValueError("No features extracted. Call extract_features() first.")
+
+        saver.save(self.extracted_features, file_path)
+
+    def plot_features(self, feature_names: List[str], channel_start: int = 0, channel_end: Optional[int] = None,
+                      time_start: float = 0, time_end: Optional[float] = None, figsize: Tuple[int, int] = (16, 6)):
+        if not feature_names:
+            raise ValueError("No features specified for plotting.")
+
+        for feature_name in feature_names:
+            if feature_name not in self.extracted_features:
+                raise ValueError(f"Feature '{feature_name}' not found. Extract it first.")
+
+        if channel_end is None:
+            channel_end = next(iter(self.extracted_features.values())).shape[1]
+        if time_end is None:
+            time_end = next(iter(self.extracted_features.values())).shape[0] / self.rate
+
+        # Convert time indices to seconds
+        time_start_idx = int(time_start * self.rate)
+        time_end_idx = int(time_end * self.rate)
+
+        # Create subplots
+        n_features = len(feature_names)
+        fig, axes = plt.subplots(1, n_features, figsize=figsize, sharey=True)
+        if n_features == 1:
+            axes = [axes]  # Make axes iterable for single subplot
+
+        for ax, feature_name in zip(axes, feature_names):
+            feature_data = self.extracted_features[feature_name]
+            plot_data = feature_data[time_start_idx:time_end_idx, channel_start:channel_end]
+
+            im = ax.imshow(plot_data.T, aspect='auto', origin='lower', cmap='viridis',
+                           extent=[time_start, time_end, channel_start, channel_end])
+
+            ax.set_title(f'{feature_name.capitalize()}')
+            ax.set_xlabel('Time (s)')
+
+            # Add colorbar
+            cbar = fig.colorbar(im, ax=ax)
+            cbar.set_label(feature_name.capitalize())
+
+        # Set common y-label
+        fig.text(0.04, 0.5, 'Channel', va='center', rotation='vertical')
+
+        plt.tight_layout()
+        plt.show()
+
+# Example usage
+if __name__ == "__main__":
+
+    path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/0000000005_2024-07-03_09.30.30.84400.hdf5'
+
+    das = DAS()
+    das.load_raw_data(path)
+
+    centroid_spread_extractor = CentroidSpreadExtractor()
+    das.extract_features(centroid_spread_extractor, window_size=1.0, normalize=True)
+
+    # das.save_features("path/to/save/features.npz")
+
+    print("Features extracted and saved successfully.")
+    print("Available features:", list(das.extracted_features.keys()))
+    for feature, data in das.extracted_features.items():
+        print(f"{feature} shape:", data.shape)
+
+    # Plot the centroid feature
+    das.plot_features(
+        ['centroid', 'spread'],
+        channel_start=0,
+        channel_end=600,
+        time_start=0,
+        time_end=30,
+        figsize=(12, 8)
+    )
