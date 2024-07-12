@@ -95,6 +95,7 @@ class RMSFrequencyBinExtractor(FeatureExtractor):
 
         return {f'rms_bin_{low}_{high}': rms_amplitudes[:, :, i] for i, (low, high) in enumerate(freq_bins)}
 
+
 class FeatureSaver(ABC):
     @abstractmethod
     def save(self, features: Dict[str, np.ndarray], file_path: str):
@@ -173,11 +174,12 @@ class DAS:
         plt.tight_layout()
         plt.show()
 
+
 # Example usage
 if __name__ == "__main__":
 
     path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/0000000005_2024-07-03_09.30.30.84400.hdf5'
-    window_size=15
+    window_size = 0.25
 
     das = DAS()
     das.load_raw_data(path)
@@ -186,7 +188,7 @@ if __name__ == "__main__":
     das.extract_features(centroid_spread_extractor, window_size=window_size, normalize=True)
 
     rms_extractor = RMSFrequencyBinExtractor()
-    das.extract_features(rms_extractor, window_size=window_size, freq_bins=[(1, 5), (5, 10), (500, 1000)])
+    das.extract_features(rms_extractor, window_size=window_size, freq_bins=[(4, 8), (5, 10), (500, 1000)])
 
     # das.save_features("path/to/save/features.npz")
 
@@ -197,7 +199,7 @@ if __name__ == "__main__":
 
     # Plot the centroid feature
     das.plot_features(
-        ['centroid', 'spread', 'rms_bin_1_5', 'rms_bin_5_10', 'rms_bin_500_1000'],
+        ['centroid', 'spread', 'rms_bin_4_8', 'rms_bin_5_10', 'rms_bin_500_1000'],
         channel_start=0,
         channel_end=2000,
         time_start=0,
