@@ -48,3 +48,11 @@ GROUP BY
 ORDER BY
     distance;
 ```
+
+## Superset setup
+```shell
+bash bootstrap-superset.sh
+```
+1. Open superset at localhost: http://localhost:8088/
+2. Add Presto database connection using `trino://admin@trino:8080/demo`
+3. Create some charts

@@ -96,6 +96,16 @@ services:
       - AWS_SECRET_ACCESS_KEY=password
       - AWS_REGION=us-east-1
 
+  superset:
+    build: ./superset
+    ports:
+      - "8088:8088"
+    container_name: superset
+    environment:
+      - SUPERSET_SECRET_KEY=secretkey
+    networks:
+      - iceberg_net
+
   #  spark-iceberg:
   #    image: tabulario/spark-iceberg
   #    container_name: spark-iceberg
@@ -120,3 +130,6 @@ services:
 
 networks:
   iceberg_net:
+
+volumes:
+  superset_home:
