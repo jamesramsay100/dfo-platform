@@ -95,6 +95,34 @@ class RMSFrequencyBinExtractor(FeatureExtractor):
 
         return {f'rms_bin_{low}_{high}': rms_amplitudes[:, :, i] for i, (low, high) in enumerate(freq_bins)}
 
+class FrequencyBinEnergy(FeatureExtractor):
+    def extract(self, data: np.ndarray, rate: float, **kwargs) -> Dict[str, np.ndarray]:
+        window_size = kwargs.get('window_size', 1.0)
+        freq_bins = kwargs.get('freq_bins', [(1, 5), (5, 10), (10, 20)])
+
+        samples_per_window = int(window_size * rate)
+        num_windows = data.shape[0] // samples_per_window
+        num_channels = data.shape[1]
+        num_bins = len(freq_bins)
+
+        rms_amplitudes = np.zeros((num_windows, num_channels, num_bins))
+
+        freqs = np.fft.rfftfreq(samples_per_window, 1 / rate)
+
+        for window in range(num_windows):
+            start = window * samples_per_window
+            end = start + samples_per_window
+            window_data = data[start:end, :]
+
+            fft_data = np.fft.rfft(window_data, axis=0)
+
+            for bin_idx, (low_freq, high_freq) in enumerate(freq_bins):
+                bin_mask = (freqs >= low_freq) & (freqs < high_freq)
+                bin_data = fft_data[bin_mask, :]
+                rms_amplitudes[window, :, bin_idx] = np.mean(bin_data, axis=0)
+
+        return {f'fbe_bin_{low}_{high}': rms_amplitudes[:, :, i] for i, (low, high) in enumerate(freq_bins)}
+
 
 class FeatureSaver(ABC):
     @abstractmethod
@@ -184,11 +212,14 @@ if __name__ == "__main__":
     das = DAS()
     das.load_raw_data(path)
 
-    centroid_spread_extractor = CentroidSpreadExtractor()
-    das.extract_features(centroid_spread_extractor, window_size=window_size, normalize=True)
+    # centroid_spread_extractor = CentroidSpreadExtractor()
+    # das.extract_features(centroid_spread_extractor, window_size=window_size, normalize=True)
+    #
+    # rms_extractor = RMSFrequencyBinExtractor()
+    # das.extract_features(rms_extractor, window_size=window_size, freq_bins=[(4, 8), (5, 10), (500, 1000)])
 
-    rms_extractor = RMSFrequencyBinExtractor()
-    das.extract_features(rms_extractor, window_size=window_size, freq_bins=[(4, 8), (5, 10), (500, 1000)])
+    fbe_extractor = FrequencyBinEnergy()
+    das.extract_features(fbe_extractor, window_size=window_size, freq_bins=[(4, 8), (5, 10), (500, 1000)])
 
     # das.save_features("path/to/save/features.npz")
 
@@ -199,7 +230,8 @@ if __name__ == "__main__":
 
     # Plot the centroid feature
     das.plot_features(
-        ['centroid', 'spread', 'rms_bin_4_8', 'rms_bin_5_10', 'rms_bin_500_1000'],
+        # ['centroid', 'spread', 'rms_bin_4_8', 'rms_bin_5_10', 'rms_bin_500_1000'],
+        ['fbe_bin_4_8'],
         channel_start=0,
         channel_end=2000,
         time_start=0,
