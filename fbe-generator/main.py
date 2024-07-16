@@ -6,6 +6,7 @@ from datetime import datetime
 from minio import Minio
 from minio.error import S3Error
 from io import BytesIO
+from PIL import Image
 
 # Minio client setup
 minio_client = Minio(
@@ -16,19 +17,34 @@ minio_client = Minio(
 )
 
 # Environment variables
-max_depth = int(os.environ.get("MAX_DEPTH", 100))
 sensor_name = os.environ.get("SENSOR_NAME", "default_sensor")
 asset_name = os.environ.get("ASSET_NAME", "default_asset")
 well_name = os.environ.get("WELL_NAME", "default_well")
-bucket_name = "dfo-bucket"  # Changed from "DFO" to a valid bucket name
+bucket_name = "dfo-bucket"
+image_path = os.environ.get("IMAGE_PATH", "input_image.png")
 
 
-def generate_fbe():
+# Load the image
+def load_image(image_path):
+    img = Image.open(image_path).convert('L')  # Convert to grayscale
+    return np.array(img)
+
+
+image_data = load_image(image_path)
+image_height, image_width = image_data.shape
+
+
+def generate_fbe(timestamp):
     df = pd.DataFrame({
-        "Depth (m)": range(max_depth),
-        **{f"RMS{i}": np.random.randint(0, 101, size=max_depth) for i in range(10)}
+        "Depth (m)": range(image_height),
     })
-    print(f"Generated DataFrame with {len(df)} rows")
+
+    time_index = timestamp % image_width
+
+    for i in range(10):  # Generate 10 identical RMS columns
+        df[f"RMS{i}"] = [image_data[d % image_height, time_index] for d in range(image_height)]
+
+    print(f"Generated DataFrame with {len(df)} rows for timestamp {timestamp}")
     return df
 
 
@@ -65,12 +81,15 @@ def ensure_bucket_exists():
 
 
 def main():
-    next_time = time.time() + 1  # Start of the next second
+    start_time = int(time.time())
+    next_time = start_time + 1  # Start of the next second
 
     while True:
         try:
+            current_timestamp = int(time.time()) - start_time
+
             # Generate and write FBE
-            df = generate_fbe()
+            df = generate_fbe(current_timestamp)
             write_to_minio(df)
 
             # Calculate sleep time
