@@ -206,20 +206,21 @@ class DAS:
 # Example usage
 if __name__ == "__main__":
 
-    path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/0000000005_2024-07-03_09.30.30.84400.hdf5'
-    window_size = 0.25
+    # path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/0000000005_2024-07-03_09.30.30.84400.hdf5'
+    path = '/Users/jamesramsay/Downloads/ap-sensing-synthetic-2-mins-1000m.hdf5'
+    window_size = 5
 
     das = DAS()
     das.load_raw_data(path)
 
-    # centroid_spread_extractor = CentroidSpreadExtractor()
-    # das.extract_features(centroid_spread_extractor, window_size=window_size, normalize=True)
-    #
-    # rms_extractor = RMSFrequencyBinExtractor()
-    # das.extract_features(rms_extractor, window_size=window_size, freq_bins=[(4, 8), (5, 10), (500, 1000)])
+    centroid_spread_extractor = CentroidSpreadExtractor()
+    das.extract_features(centroid_spread_extractor, window_size=window_size, normalize=True)
 
-    fbe_extractor = FrequencyBinEnergy()
-    das.extract_features(fbe_extractor, window_size=window_size, freq_bins=[(4, 8), (5, 10), (500, 1000)])
+    rms_extractor = RMSFrequencyBinExtractor()
+    das.extract_features(rms_extractor, window_size=window_size, freq_bins=[(1, 5), (5, 10), (500, 1000)])
+
+    # fbe_extractor = FrequencyBinEnergy()
+    # das.extract_features(fbe_extractor, window_size=window_size, freq_bins=[(4, 8), (5, 10), (500, 1000)])
 
     # das.save_features("path/to/save/features.npz")
 
@@ -230,11 +231,11 @@ if __name__ == "__main__":
 
     # Plot the centroid feature
     das.plot_features(
-        # ['centroid', 'spread', 'rms_bin_4_8', 'rms_bin_5_10', 'rms_bin_500_1000'],
-        ['fbe_bin_4_8'],
+        ['centroid', 'spread', 'rms_bin_1_5', 'rms_bin_5_10', 'rms_bin_500_1000'],
+        # ['centroid', 'spread'],
         channel_start=0,
-        channel_end=2000,
+        channel_end=1000,
         time_start=0,
-        time_end=30,
+        time_end=180,
         figsize=(12, 8)
     )
