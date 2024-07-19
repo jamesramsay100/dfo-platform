@@ -199,7 +199,7 @@ class DAS:
 # Example usage
 if __name__ == "__main__":
     path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/0000000005_2024-07-03_09.30.30.84400.hdf5'
-    # path = '/Users/jamesramsay/Downloads/ap-sensing-synthetic-2-mins-1000m.hdf5'
+    # path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/delme.hdf5'
     window_size = 0.25  # 250 ms window
 
     das = DAS()
@@ -218,8 +218,8 @@ if __name__ == "__main__":
     das.plot_features(
         ['fbe_4_8', 'fbe_8_20', 'fbe_20_48', 'fbe_48_100'],
         channel_start=0,
-        channel_end=4020,
+        channel_end=400,
         time_start=0,
-        time_end=150,
+        time_end=120,
         figsize=(16, 4)
     )
