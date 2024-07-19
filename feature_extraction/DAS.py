@@ -44,6 +44,8 @@ class Preprocessor:
         self.window_size = window_size
 
     def preprocess(self, data: np.ndarray, rate: float) -> np.ndarray:
+        # Ensure rate is a scalar
+        rate = float(np.asarray(rate).item())
         samples_per_window = int(self.window_size * rate)
         num_windows = data.shape[0] // samples_per_window
 
@@ -71,13 +73,15 @@ class FBEExtractor(FeatureExtractor):
         self.freq_bands = freq_bands or [(4, 8), (8, 20), (20, 48), (48, 100), (100, None)]
 
     def extract(self, data: np.ndarray, rate: float, **kwargs) -> Dict[str, np.ndarray]:
-        window_size = kwargs.get('window_size', 0.25)
+        # Ensure rate and window_size are scalars
+        rate = float(np.asarray(rate).item())
+        window_size = float(np.asarray(kwargs.get('window_size', 0.25)).item())
         samples_per_window = int(window_size * rate)
         num_windows, _, num_channels = data.shape
 
         freqs = np.fft.rfftfreq(samples_per_window, 1 / rate)
         fft_data = np.fft.rfft(data, axis=1)
-        psd = np.abs(fft_data) ** 2 / (rate * samples_per_window)
+        psd = np.abs(fft_data)**2 / (rate * samples_per_window)
 
         fbe_results = {}
         for i, (low, high) in enumerate(self.freq_bands):
@@ -112,6 +116,8 @@ class DAS:
 
     def load_raw_data(self, file_path: str):
         self.das_data, self.rate = self.file_loader.load(file_path)
+        # Ensure rate is a scalar
+        self.rate = float(np.asarray(self.rate).item())
 
     def preprocess(self, window_size: float = 0.25):
         if self.das_data is None or self.rate is None:
