@@ -147,14 +147,27 @@ class DAS:
             if feature_name not in self.extracted_features:
                 raise ValueError(f"Feature '{feature_name}' not found. Extract it first.")
 
-        if channel_end is None:
-            channel_end = next(iter(self.extracted_features.values())).shape[1]
-        if time_end is None:
-            time_end = self.preprocessed_data.shape[0] * self.preprocessor.window_size
+        # Get the shape of the first feature to determine available data
+        first_feature = next(iter(self.extracted_features.values()))
+        max_time, max_channels = first_feature.shape
 
-        # Convert time indices to window indices
+        # Convert time to indices
         time_start_idx = int(time_start / self.preprocessor.window_size)
-        time_end_idx = int(time_end / self.preprocessor.window_size)
+        time_end_idx = int(time_end / self.preprocessor.window_size) if time_end is not None else max_time
+
+        # Ensure we don't exceed available data
+        time_end_idx = min(time_end_idx, max_time)
+
+        if channel_end is None:
+            channel_end = max_channels
+        else:
+            channel_end = min(channel_end, max_channels)
+
+        channel_start = max(0, min(channel_start, channel_end - 1))
+
+        # Calculate actual time range
+        actual_time_start = time_start_idx * self.preprocessor.window_size
+        actual_time_end = time_end_idx * self.preprocessor.window_size
 
         # Create subplots
         n_features = len(feature_names)
@@ -167,7 +180,7 @@ class DAS:
             plot_data = feature_data[time_start_idx:time_end_idx, channel_start:channel_end]
 
             im = ax.imshow(plot_data.T, aspect='auto', origin='lower', cmap='viridis',
-                           extent=[time_start, time_end, channel_start, channel_end])
+                           extent=[actual_time_start, actual_time_end, channel_start, channel_end])
 
             ax.set_title(f'{feature_name.capitalize()}')
             ax.set_xlabel('Time (s)')
@@ -207,6 +220,6 @@ if __name__ == "__main__":
         channel_start=0,
         channel_end=4020,
         time_start=0,
-        time_end=30,
+        time_end=150,
         figsize=(16, 4)
     )
