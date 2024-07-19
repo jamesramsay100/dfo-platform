@@ -1,5 +1,6 @@
 import h5py
 import numpy as np
+from scipy.signal.windows import blackmanharris
 from scipy.fft import rfft
 from typing import Tuple, Optional, Dict, Any, List
 from abc import ABC, abstractmethod
@@ -15,9 +16,48 @@ class DASFileLoader(ABC):
 class StandardH5Loader(DASFileLoader):
     def load(self, file_path: str) -> Tuple[np.ndarray, float]:
         with h5py.File(file_path, 'r') as h5_file:
-            das_data = h5_file.get('DAS')[:]
-            rate = h5_file.get('DAS').attrs['Rate'][0]
-        return das_data, rate
+            if 'DAS' in h5_file:
+                dphase_s16 = h5_file['DAS'][:]
+            else:
+                raise KeyError("Unable to find 'DAS' dataset in the HDF5 file.")
+
+                # Load pulse rate (try different possible paths)
+            pulse_rate = None
+            possible_paths = ['DAQ/RepetitionFrequency', 'DAQ/PulseRate', 'ProcessingServer/DataRate']
+            for path in possible_paths:
+                if path in h5_file:
+                    pulse_rate = h5_file[path][()]
+                    break
+
+            if pulse_rate is None:
+                raise KeyError(f"Unable to find pulse rate in the HDF5 file. Tried paths: {possible_paths}")
+
+        # Convert differential phase to phase
+        phase_s64 = np.cumsum(dphase_s16.astype(np.int64), axis=0)
+        phase_f64 = phase_s64 * np.pi / 2 ** 15
+
+        return phase_f64, pulse_rate
+
+
+class Preprocessor:
+    def __init__(self, window_size: float = 0.25):
+        self.window_size = window_size
+
+    def preprocess(self, data: np.ndarray, rate: float) -> np.ndarray:
+        samples_per_window = int(self.window_size * rate)
+        num_windows = data.shape[0] // samples_per_window
+
+        # Reshape data into windows
+        windowed_data = data[:num_windows * samples_per_window].reshape(num_windows, samples_per_window, -1)
+
+        # Apply Blackman-Harris window
+        window = blackmanharris(samples_per_window)[:, np.newaxis]
+        windowed_data = windowed_data * window
+
+        # Remove DC (mean) from each window
+        windowed_data = windowed_data - np.mean(windowed_data, axis=1, keepdims=True)
+
+        return windowed_data
 
 
 class FeatureExtractor(ABC):
@@ -26,102 +66,28 @@ class FeatureExtractor(ABC):
         pass
 
 
-class CentroidSpreadExtractor(FeatureExtractor):
+class FBEExtractor(FeatureExtractor):
+    def __init__(self, freq_bands: List[Tuple[float, float]] = None):
+        self.freq_bands = freq_bands or [(4, 8), (8, 20), (20, 48), (48, 100), (100, None)]
+
     def extract(self, data: np.ndarray, rate: float, **kwargs) -> Dict[str, np.ndarray]:
-        window_size = kwargs.get('window_size', 1.0)
-        normalize = kwargs.get('normalize', False)
-        freq_range = kwargs.get('freq_range', None)
-
+        window_size = kwargs.get('window_size', 0.25)
         samples_per_window = int(window_size * rate)
-        num_windows = data.shape[0] // samples_per_window
-        num_channels = data.shape[1]
-
-        centroids = np.zeros((num_windows, num_channels))
-        spreads = np.zeros((num_windows, num_channels))
+        num_windows, _, num_channels = data.shape
 
         freqs = np.fft.rfftfreq(samples_per_window, 1 / rate)
+        fft_data = np.fft.rfft(data, axis=1)
+        psd = np.abs(fft_data) ** 2 / (rate * samples_per_window)
 
-        if freq_range:
-            freq_mask = (freqs >= freq_range[0]) & (freqs <= freq_range[1])
-        else:
-            freq_mask = np.ones_like(freqs, dtype=bool)
+        fbe_results = {}
+        for i, (low, high) in enumerate(self.freq_bands):
+            if high is None:
+                high = rate / 2
+            mask = (freqs >= low) & (freqs < high)
+            fbe = np.mean(psd[:, mask, :], axis=1)
+            fbe_results[f'fbe_{low}_{high}'] = fbe
 
-        masked_freqs = freqs[freq_mask]
-
-        for window in range(num_windows):
-            start = window * samples_per_window
-            end = start + samples_per_window
-            window_data = data[start:end, :]
-
-            if normalize:
-                window_data = (window_data - np.mean(window_data, axis=0)) / np.std(window_data, axis=0)
-
-            fft_data = np.abs(np.fft.rfft(window_data, axis=0))
-            masked_fft = fft_data[freq_mask, :]
-
-            total_power = np.sum(masked_fft, axis=0)
-            centroids[window] = np.sum(masked_freqs[:, np.newaxis] * masked_fft, axis=0) / total_power
-            spreads[window] = np.sqrt(
-                np.sum(((masked_freqs[:, np.newaxis] - centroids[window]) ** 2) * masked_fft, axis=0) / total_power)
-
-        return {'centroid': centroids, 'spread': spreads}
-
-
-class RMSFrequencyBinExtractor(FeatureExtractor):
-    def extract(self, data: np.ndarray, rate: float, **kwargs) -> Dict[str, np.ndarray]:
-        window_size = kwargs.get('window_size', 1.0)
-        freq_bins = kwargs.get('freq_bins', [(1, 5), (5, 10), (10, 20)])
-
-        samples_per_window = int(window_size * rate)
-        num_windows = data.shape[0] // samples_per_window
-        num_channels = data.shape[1]
-        num_bins = len(freq_bins)
-
-        rms_amplitudes = np.zeros((num_windows, num_channels, num_bins))
-
-        freqs = np.fft.rfftfreq(samples_per_window, 1 / rate)
-
-        for window in range(num_windows):
-            start = window * samples_per_window
-            end = start + samples_per_window
-            window_data = data[start:end, :]
-
-            fft_data = np.abs(np.fft.rfft(window_data, axis=0))
-
-            for bin_idx, (low_freq, high_freq) in enumerate(freq_bins):
-                bin_mask = (freqs >= low_freq) & (freqs < high_freq)
-                bin_data = fft_data[bin_mask, :]
-                rms_amplitudes[window, :, bin_idx] = np.sqrt(np.mean(bin_data ** 2, axis=0))
-
-        return {f'rms_bin_{low}_{high}': rms_amplitudes[:, :, i] for i, (low, high) in enumerate(freq_bins)}
-
-class FrequencyBinEnergy(FeatureExtractor):
-    def extract(self, data: np.ndarray, rate: float, **kwargs) -> Dict[str, np.ndarray]:
-        window_size = kwargs.get('window_size', 1.0)
-        freq_bins = kwargs.get('freq_bins', [(1, 5), (5, 10), (10, 20)])
-
-        samples_per_window = int(window_size * rate)
-        num_windows = data.shape[0] // samples_per_window
-        num_channels = data.shape[1]
-        num_bins = len(freq_bins)
-
-        rms_amplitudes = np.zeros((num_windows, num_channels, num_bins))
-
-        freqs = np.fft.rfftfreq(samples_per_window, 1 / rate)
-
-        for window in range(num_windows):
-            start = window * samples_per_window
-            end = start + samples_per_window
-            window_data = data[start:end, :]
-
-            fft_data = np.fft.rfft(window_data, axis=0)
-
-            for bin_idx, (low_freq, high_freq) in enumerate(freq_bins):
-                bin_mask = (freqs >= low_freq) & (freqs < high_freq)
-                bin_data = fft_data[bin_mask, :]
-                rms_amplitudes[window, :, bin_idx] = np.mean(bin_data, axis=0)
-
-        return {f'fbe_bin_{low}_{high}': rms_amplitudes[:, :, i] for i, (low, high) in enumerate(freq_bins)}
+        return fbe_results
 
 
 class FeatureSaver(ABC):
@@ -139,17 +105,25 @@ class DAS:
     def __init__(self, file_loader: DASFileLoader = StandardH5Loader()):
         self.das_data: Optional[np.ndarray] = None
         self.rate: Optional[float] = None
+        self.preprocessed_data: Optional[np.ndarray] = None
         self.extracted_features: Dict[str, np.ndarray] = {}
         self.file_loader = file_loader
+        self.preprocessor = Preprocessor()
 
     def load_raw_data(self, file_path: str):
         self.das_data, self.rate = self.file_loader.load(file_path)
 
-    def extract_features(self, extractor: FeatureExtractor, **kwargs):
+    def preprocess(self, window_size: float = 0.25):
         if self.das_data is None or self.rate is None:
             raise ValueError("Raw data not loaded. Call load_raw_data() first.")
+        self.preprocessor.window_size = window_size
+        self.preprocessed_data = self.preprocessor.preprocess(self.das_data, self.rate)
 
-        features = extractor.extract(self.das_data, self.rate, **kwargs)
+    def extract_features(self, extractor: FeatureExtractor, **kwargs):
+        if self.preprocessed_data is None:
+            raise ValueError("Data not preprocessed. Call preprocess() first.")
+
+        features = extractor.extract(self.preprocessed_data, self.rate, **kwargs)
         self.extracted_features.update(features)
 
     def save_features(self, file_path: str, saver: FeatureSaver = NpzSaver()):
@@ -170,11 +144,11 @@ class DAS:
         if channel_end is None:
             channel_end = next(iter(self.extracted_features.values())).shape[1]
         if time_end is None:
-            time_end = next(iter(self.extracted_features.values())).shape[0] / self.rate
+            time_end = self.preprocessed_data.shape[0] * self.preprocessor.window_size
 
-        # Convert time indices to seconds
-        time_start_idx = int(time_start * self.rate)
-        time_end_idx = int(time_end * self.rate)
+        # Convert time indices to window indices
+        time_start_idx = int(time_start / self.preprocessor.window_size)
+        time_end_idx = int(time_end / self.preprocessor.window_size)
 
         # Create subplots
         n_features = len(feature_names)
@@ -205,37 +179,28 @@ class DAS:
 
 # Example usage
 if __name__ == "__main__":
-
-    # path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/0000000005_2024-07-03_09.30.30.84400.hdf5'
-    path = '/Users/jamesramsay/Downloads/ap-sensing-synthetic-2-mins-1000m.hdf5'
-    window_size = 5
+    path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/0000000005_2024-07-03_09.30.30.84400.hdf5'
+    # path = '/Users/jamesramsay/Downloads/ap-sensing-synthetic-2-mins-1000m.hdf5'
+    window_size = 0.25  # 250 ms window
 
     das = DAS()
     das.load_raw_data(path)
+    das.preprocess(window_size=window_size)
 
-    centroid_spread_extractor = CentroidSpreadExtractor()
-    das.extract_features(centroid_spread_extractor, window_size=window_size, normalize=True)
+    fbe_extractor = FBEExtractor()
+    das.extract_features(fbe_extractor, window_size=window_size)
 
-    rms_extractor = RMSFrequencyBinExtractor()
-    das.extract_features(rms_extractor, window_size=window_size, freq_bins=[(1, 5), (5, 10), (500, 1000)])
-
-    # fbe_extractor = FrequencyBinEnergy()
-    # das.extract_features(fbe_extractor, window_size=window_size, freq_bins=[(4, 8), (5, 10), (500, 1000)])
-
-    # das.save_features("path/to/save/features.npz")
-
-    print("Features extracted and saved successfully.")
+    print("Features extracted successfully.")
     print("Available features:", list(das.extracted_features.keys()))
     for feature, data in das.extracted_features.items():
         print(f"{feature} shape:", data.shape)
 
-    # Plot the centroid feature
+    # Plot the FBE features
     das.plot_features(
-        ['centroid', 'spread', 'rms_bin_1_5', 'rms_bin_5_10', 'rms_bin_500_1000'],
-        # ['centroid', 'spread'],
+        ['fbe_4_8', 'fbe_8_20', 'fbe_20_48', 'fbe_48_100'],
         channel_start=0,
-        channel_end=1000,
+        channel_end=4020,
         time_start=0,
-        time_end=180,
-        figsize=(12, 8)
+        time_end=30,
+        figsize=(16, 4)
     )
