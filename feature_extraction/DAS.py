@@ -1,7 +1,7 @@
 import h5py
 import numpy as np
 from scipy.signal.windows import blackmanharris
-from scipy.fft import rfft
+import time
 from typing import Tuple, Optional, Dict, Any, List
 from abc import ABC, abstractmethod
 import matplotlib.pyplot as plt
@@ -113,24 +113,38 @@ class DAS:
         self.extracted_features: Dict[str, np.ndarray] = {}
         self.file_loader = file_loader
         self.preprocessor = Preprocessor()
+        self.timings = {}
 
     def load_raw_data(self, file_path: str):
+        start_time = time.time()
         self.das_data, self.rate = self.file_loader.load(file_path)
-        # Ensure rate is a scalar
         self.rate = float(np.asarray(self.rate).item())
+        end_time = time.time()
+        self.timings['load_raw_data'] = end_time - start_time
 
     def preprocess(self, window_size: float = 0.25):
         if self.das_data is None or self.rate is None:
             raise ValueError("Raw data not loaded. Call load_raw_data() first.")
+        start_time = time.time()
         self.preprocessor.window_size = window_size
         self.preprocessed_data = self.preprocessor.preprocess(self.das_data, self.rate)
+        end_time = time.time()
+        self.timings['preprocess'] = end_time - start_time
 
     def extract_features(self, extractor: FeatureExtractor, **kwargs):
         if self.preprocessed_data is None:
             raise ValueError("Data not preprocessed. Call preprocess() first.")
-
+        start_time = time.time()
         features = extractor.extract(self.preprocessed_data, self.rate, **kwargs)
         self.extracted_features.update(features)
+        end_time = time.time()
+        self.timings['extract_features'] = end_time - start_time
+
+    def print_timings(self):
+        print("Operation Timings:")
+        for operation, duration in self.timings.items():
+            print(f"  {operation}: {duration:.2f} seconds")
+        print(f"  Total: {sum(self.timings.values()):.2f} seconds")
 
     def save_features(self, file_path: str, saver: FeatureSaver = NpzSaver()):
         if not self.extracted_features:
@@ -197,9 +211,9 @@ class DAS:
 
 
 # Example usage
+
 if __name__ == "__main__":
     path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/0000000005_2024-07-03_09.30.30.84400.hdf5'
-    # path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/delme.hdf5'
     window_size = 0.25  # 250 ms window
 
     das = DAS()
@@ -209,7 +223,9 @@ if __name__ == "__main__":
     fbe_extractor = FBEExtractor()
     das.extract_features(fbe_extractor, window_size=window_size)
 
-    print("Features extracted successfully.")
+    das.print_timings()
+
+    print("\nFeatures extracted successfully.")
     print("Available features:", list(das.extracted_features.keys()))
     for feature, data in das.extracted_features.items():
         print(f"{feature} shape:", data.shape)
