@@ -5,23 +5,26 @@ import time
 from typing import Tuple, Optional, Dict, Any, List
 from abc import ABC, abstractmethod
 import matplotlib.pyplot as plt
+from dask.distributed import Client, progress
+import dask.array as da
 
 
 class DASFileLoader(ABC):
     @abstractmethod
-    def load(self, file_path: str) -> Tuple[np.ndarray, float]:
+    def load(self, file_path: str) -> Tuple[da.Array, float]:
         pass
 
 
 class StandardH5Loader(DASFileLoader):
-    def load(self, file_path: str) -> Tuple[np.ndarray, float]:
+    def load(self, file_path: str) -> Tuple[da.Array, float]:
         with h5py.File(file_path, 'r') as h5_file:
             if 'DAS' in h5_file:
-                dphase_s16 = h5_file['DAS'][:]
+                storage = h5_file['DAS']
+                dphase_s16 = da.from_array(storage[:], chunks=(500, 4020))
             else:
                 raise KeyError("Unable to find 'DAS' dataset in the HDF5 file.")
 
-                # Load pulse rate (try different possible paths)
+            # Load pulse rate (try different possible paths)
             pulse_rate = None
             possible_paths = ['DAQ/RepetitionFrequency', 'DAQ/PulseRate', 'ProcessingServer/DataRate']
             for path in possible_paths:
@@ -33,8 +36,8 @@ class StandardH5Loader(DASFileLoader):
                 raise KeyError(f"Unable to find pulse rate in the HDF5 file. Tried paths: {possible_paths}")
 
         # Convert differential phase to phase
-        phase_s64 = np.cumsum(dphase_s16.astype(np.int64), axis=0)
-        phase_f64 = phase_s64 * np.pi / 2 ** 15
+        phase_s64 = da.cumsum(dphase_s16.astype(np.int64), axis=0)
+        phase_f64 = phase_s64 * (np.pi / 2 ** 15)
 
         return phase_f64, pulse_rate
 
@@ -43,21 +46,57 @@ class Preprocessor:
     def __init__(self, window_size: float = 0.25):
         self.window_size = window_size
 
-    def preprocess(self, data: np.ndarray, rate: float) -> np.ndarray:
+    def preprocess(self, data: da.Array, rate: float) -> da.Array:
         # Ensure rate is a scalar
         rate = float(np.asarray(rate).item())
         samples_per_window = int(self.window_size * rate)
-        num_windows = data.shape[0] // samples_per_window
 
-        # Reshape data into windows
-        windowed_data = data[:num_windows * samples_per_window].reshape(num_windows, samples_per_window, -1)
+        # Create Blackman-Harris window
+        window = blackmanharris(samples_per_window)
 
-        # Apply Blackman-Harris window
-        window = blackmanharris(samples_per_window)[:, np.newaxis]
-        windowed_data = windowed_data * window
+        def apply_window_and_demean(chunk):
+            # Handle chunks smaller than the window size
+            if chunk.shape[0] < samples_per_window:
+                return np.zeros((0, chunk.shape[1]), dtype=chunk.dtype)
 
-        # Remove DC (mean) from each window
-        windowed_data = windowed_data - np.mean(windowed_data, axis=1, keepdims=True)
+            # Calculate how many complete windows fit in this chunk
+            num_windows = chunk.shape[0] // samples_per_window
+            usable_size = num_windows * samples_per_window
+
+            # Reshape usable part of chunk into windows
+            chunk_windows = chunk[:usable_size].reshape(num_windows, samples_per_window, chunk.shape[1])
+
+            # Apply window
+            windowed = chunk_windows * window[:, np.newaxis]
+
+            # Remove DC (mean) from each window
+            demeaned = windowed - np.mean(windowed, axis=1, keepdims=True)
+
+            return demeaned.reshape(-1, chunk.shape[1])
+
+        # Use map_overlap to apply the windowing function
+        # meta = np.zeros((samples_per_window, data.shape[1]), dtype=data.dtype)
+        meta = np.zeros((1,1), dtype=data.dtype)
+        # windowed_data = data.map_overlap(
+        #     apply_window_and_demean,
+        #     depth=(samples_per_window - 1, 0),
+        #     boundary='reflect',
+        #     chunks=(samples_per_window, data.chunks[1]),
+        #     dtype=data.dtype,
+        #     meta=meta
+        # )
+        windowed_data = data.map_blocks(
+            apply_window_and_demean,
+            # depth=(samples_per_window - 1, 0),
+            # boundary='reflect',
+            chunks=(samples_per_window, data.chunks[1]),
+            dtype=data.dtype,
+            meta=meta
+        )
+
+        total_windows = data.shape[0] // samples_per_window
+        final_shape = (total_windows, samples_per_window, data.shape[1])
+        windowed_data = windowed_data.reshape(final_shape)
 
         return windowed_data
 
@@ -72,24 +111,25 @@ class FBEExtractor(FeatureExtractor):
     def __init__(self, freq_bands: List[Tuple[float, float]] = None):
         self.freq_bands = freq_bands or [(4, 8), (8, 20), (20, 48), (48, 100), (100, None)]
 
-    def extract(self, data: np.ndarray, rate: float, **kwargs) -> Dict[str, np.ndarray]:
+    def extract(self, data: da.Array, rate: float, **kwargs) -> Dict[str, da.Array]:
         # Ensure rate and window_size are scalars
         rate = float(np.asarray(rate).item())
         window_size = float(np.asarray(kwargs.get('window_size', 0.25)).item())
         samples_per_window = int(window_size * rate)
         num_windows, _, num_channels = data.shape
+        # num_windows, num_channels = data.shape
 
-        freqs = np.fft.rfftfreq(samples_per_window, 1 / rate)
-        fft_data = np.fft.rfft(data, axis=1)
-        psd = np.abs(fft_data)**2 / (rate * samples_per_window)
+        freqs = da.fft.rfftfreq(samples_per_window, 1 / rate)
+        fft_data = da.fft.rfft(data, axis=1)
+        psd = (da.abs(fft_data) ** 2) / (rate * samples_per_window)
 
         fbe_results = {}
         for i, (low, high) in enumerate(self.freq_bands):
             if high is None:
                 high = rate / 2
             mask = (freqs >= low) & (freqs < high)
-            fbe_linear = np.mean(psd[:, mask, :], axis=1)
-            fbe_db = 10 * np.log10(fbe_linear)  # Convert to dB
+            fbe_linear = da.mean(psd[:, mask, :], axis=1)
+            fbe_db = 10 * da.log10(fbe_linear)  # Convert to dB
             fbe_results[f'fbe_{low}_{high}'] = fbe_db
 
         return fbe_results
@@ -115,6 +155,9 @@ class DAS:
         self.file_loader = file_loader
         self.preprocessor = Preprocessor()
         self.timings = {}
+        self.client = Client(processes=False, threads_per_worker=4,
+                             n_workers=1, memory_limit='4GB')
+        print(self.client.dashboard_link)
 
     def load_raw_data(self, file_path: str):
         start_time = time.time()
