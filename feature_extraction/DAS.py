@@ -88,8 +88,9 @@ class FBEExtractor(FeatureExtractor):
             if high is None:
                 high = rate / 2
             mask = (freqs >= low) & (freqs < high)
-            fbe = np.mean(psd[:, mask, :], axis=1)
-            fbe_results[f'fbe_{low}_{high}'] = fbe
+            fbe_linear = np.mean(psd[:, mask, :], axis=1)
+            fbe_db = 10 * np.log10(fbe_linear)  # Convert to dB
+            fbe_results[f'fbe_{low}_{high}'] = fbe_db
 
         return fbe_results
 
