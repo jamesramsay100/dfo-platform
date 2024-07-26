@@ -1,30 +1,26 @@
-import h5py
 import numpy as np
-from scipy.signal.windows import blackmanharris
-import time
-from typing import Tuple, Optional, Dict, Any, List
+import h5py
+from typing import Dict, List, Tuple, Optional
 from abc import ABC, abstractmethod
-import matplotlib.pyplot as plt
+import dask
 from dask.distributed import Client, progress
-import dask.array as da
+import matplotlib.pyplot as plt
 
 
 class DASFileLoader(ABC):
     @abstractmethod
-    def load(self, file_path: str) -> Tuple[da.Array, float]:
+    def load(self, file_path: str) -> Tuple[np.ndarray, float]:
         pass
 
 
 class StandardH5Loader(DASFileLoader):
-    def load(self, file_path: str) -> Tuple[da.Array, float]:
+    def load(self, file_path: str) -> Tuple[np.ndarray, float]:
         with h5py.File(file_path, 'r') as h5_file:
             if 'DAS' in h5_file:
-                storage = h5_file['DAS']
-                dphase_s16 = da.from_array(storage[:], chunks=(500, 4020))
+                dphase_s16 = h5_file['DAS'][:]
             else:
                 raise KeyError("Unable to find 'DAS' dataset in the HDF5 file.")
 
-            # Load pulse rate (try different possible paths)
             pulse_rate = None
             possible_paths = ['DAQ/RepetitionFrequency', 'DAQ/PulseRate', 'ProcessingServer/DataRate']
             for path in possible_paths:
@@ -35,9 +31,8 @@ class StandardH5Loader(DASFileLoader):
             if pulse_rate is None:
                 raise KeyError(f"Unable to find pulse rate in the HDF5 file. Tried paths: {possible_paths}")
 
-        # Convert differential phase to phase
-        phase_s64 = da.cumsum(dphase_s16.astype(np.int64), axis=0)
-        phase_f64 = phase_s64 * (np.pi / 2 ** 15)
+        phase_s64 = np.cumsum(dphase_s16.astype(np.int64), axis=0)
+        phase_f64 = phase_s64 * np.pi / 2 ** 15
 
         return phase_f64, pulse_rate
 
@@ -46,57 +41,17 @@ class Preprocessor:
     def __init__(self, window_size: float = 0.25):
         self.window_size = window_size
 
-    def preprocess(self, data: da.Array, rate: float) -> da.Array:
-        # Ensure rate is a scalar
+    def preprocess(self, data: np.ndarray, rate: float) -> np.ndarray:
         rate = float(np.asarray(rate).item())
         samples_per_window = int(self.window_size * rate)
+        num_windows = data.shape[0] // samples_per_window
 
-        # Create Blackman-Harris window
-        window = blackmanharris(samples_per_window)
+        windowed_data = data[:num_windows * samples_per_window].reshape(num_windows, samples_per_window, -1)
 
-        def apply_window_and_demean(chunk):
-            # Handle chunks smaller than the window size
-            if chunk.shape[0] < samples_per_window:
-                return np.zeros((0, chunk.shape[1]), dtype=chunk.dtype)
+        window = np.blackman(samples_per_window)[:, np.newaxis]
+        windowed_data = windowed_data * window
 
-            # Calculate how many complete windows fit in this chunk
-            num_windows = chunk.shape[0] // samples_per_window
-            usable_size = num_windows * samples_per_window
-
-            # Reshape usable part of chunk into windows
-            chunk_windows = chunk[:usable_size].reshape(num_windows, samples_per_window, chunk.shape[1])
-
-            # Apply window
-            windowed = chunk_windows * window[:, np.newaxis]
-
-            # Remove DC (mean) from each window
-            demeaned = windowed - np.mean(windowed, axis=1, keepdims=True)
-
-            return demeaned.reshape(-1, chunk.shape[1])
-
-        # Use map_overlap to apply the windowing function
-        # meta = np.zeros((samples_per_window, data.shape[1]), dtype=data.dtype)
-        meta = np.zeros((1,1), dtype=data.dtype)
-        # windowed_data = data.map_overlap(
-        #     apply_window_and_demean,
-        #     depth=(samples_per_window - 1, 0),
-        #     boundary='reflect',
-        #     chunks=(samples_per_window, data.chunks[1]),
-        #     dtype=data.dtype,
-        #     meta=meta
-        # )
-        windowed_data = data.map_blocks(
-            apply_window_and_demean,
-            # depth=(samples_per_window - 1, 0),
-            # boundary='reflect',
-            chunks=(samples_per_window, data.chunks[1]),
-            dtype=data.dtype,
-            meta=meta
-        )
-
-        total_windows = data.shape[0] // samples_per_window
-        final_shape = (total_windows, samples_per_window, data.shape[1])
-        windowed_data = windowed_data.reshape(final_shape)
+        windowed_data = windowed_data - np.mean(windowed_data, axis=1, keepdims=True)
 
         return windowed_data
 
@@ -111,39 +66,25 @@ class FBEExtractor(FeatureExtractor):
     def __init__(self, freq_bands: List[Tuple[float, float]] = None):
         self.freq_bands = freq_bands or [(4, 8), (8, 20), (20, 48), (48, 100), (100, None)]
 
-    def extract(self, data: da.Array, rate: float, **kwargs) -> Dict[str, da.Array]:
-        # Ensure rate and window_size are scalars
+    def extract(self, data: np.ndarray, rate: float, **kwargs) -> Dict[str, np.ndarray]:
         rate = float(np.asarray(rate).item())
         window_size = float(np.asarray(kwargs.get('window_size', 0.25)).item())
         samples_per_window = int(window_size * rate)
-        num_windows, _, num_channels = data.shape
-        # num_windows, num_channels = data.shape
 
-        freqs = da.fft.rfftfreq(samples_per_window, 1 / rate)
-        fft_data = da.fft.rfft(data, axis=1)
-        psd = (da.abs(fft_data) ** 2) / (rate * samples_per_window)
+        freqs = np.fft.rfftfreq(samples_per_window, 1 / rate)
+        fft_data = np.fft.rfft(data, axis=1)
+        psd = np.abs(fft_data) ** 2 / (rate * samples_per_window)
 
         fbe_results = {}
         for i, (low, high) in enumerate(self.freq_bands):
             if high is None:
                 high = rate / 2
             mask = (freqs >= low) & (freqs < high)
-            fbe_linear = da.mean(psd[:, mask, :], axis=1)
-            fbe_db = 10 * da.log10(fbe_linear)  # Convert to dB
+            fbe_linear = np.mean(psd[:, mask, :], axis=1)
+            fbe_db = 10 * np.log10(fbe_linear)  # Convert to dB
             fbe_results[f'fbe_{low}_{high}'] = fbe_db
 
         return fbe_results
-
-
-class FeatureSaver(ABC):
-    @abstractmethod
-    def save(self, features: Dict[str, np.ndarray], file_path: str):
-        pass
-
-
-class NpzSaver(FeatureSaver):
-    def save(self, features: Dict[str, np.ndarray], file_path: str):
-        np.savez(file_path, **features)
 
 
 class DAS:
@@ -154,66 +95,43 @@ class DAS:
         self.extracted_features: Dict[str, np.ndarray] = {}
         self.file_loader = file_loader
         self.preprocessor = Preprocessor()
-        self.timings = {}
-        self.client = Client(processes=False, threads_per_worker=4,
-                             n_workers=1, memory_limit='4GB')
-        print(self.client.dashboard_link)
+        self.extractor = FBEExtractor()
 
-    def load_raw_data(self, file_path: str):
-        start_time = time.time()
-        self.das_data, self.rate = self.file_loader.load(file_path)
-        self.rate = float(np.asarray(self.rate).item())
-        end_time = time.time()
-        self.timings['load_raw_data'] = end_time - start_time
+    def load_and_process_chunk(self, file_path: str, start_index: int, chunk_size: int, window_size: float):
+        with h5py.File(file_path, 'r') as h5_file:
+            chunk_data = h5_file['DAS'][start_index:start_index + chunk_size, :]
+            pulse_rate = h5_file['DAQ/PulseRate'][()]
 
-    def preprocess(self, window_size: float = 0.25):
-        if self.das_data is None or self.rate is None:
-            raise ValueError("Raw data not loaded. Call load_raw_data() first.")
-        start_time = time.time()
-        self.preprocessor.window_size = window_size
-        self.preprocessed_data = self.preprocessor.preprocess(self.das_data, self.rate)
-        end_time = time.time()
-        self.timings['preprocess'] = end_time - start_time
+        # phase_s64 = np.cumsum(chunk_data.astype(np.int64), axis=0)
+        phase_s64 = chunk_data.astype(np.int64)
+        phase_f64 = phase_s64 * np.pi / 2 ** 15
 
-    def extract_features(self, extractor: FeatureExtractor, **kwargs):
-        if self.preprocessed_data is None:
-            raise ValueError("Data not preprocessed. Call preprocess() first.")
-        start_time = time.time()
-        features = extractor.extract(self.preprocessed_data, self.rate, **kwargs)
-        self.extracted_features.update(features)
-        end_time = time.time()
-        self.timings['extract_features'] = end_time - start_time
+        preprocessed = self.preprocessor.preprocess(phase_f64, pulse_rate)
+        features = self.extractor.extract(preprocessed, pulse_rate, window_size=window_size)
 
-    def print_timings(self):
-        print("Operation Timings:")
-        for operation, duration in self.timings.items():
-            print(f"  {operation}: {duration:.2f} seconds")
-        print(f"  Total: {sum(self.timings.values()):.2f} seconds")
+        return features
 
-    def save_features(self, file_path: str, saver: FeatureSaver = NpzSaver()):
-        if not self.extracted_features:
-            raise ValueError("No features extracted. Call extract_features() first.")
+    def process_file(self, file_path: str, chunk_size: int = 100000, window_size: float = 0.25):
+        with h5py.File(file_path, 'r') as h5_file:
+            total_traces = h5_file['DAS'].shape[0]
 
-        saver.save(self.extracted_features, file_path)
+        lazy_results = []
+        for start_index in range(0, total_traces, chunk_size):
+            lazy_result = dask.delayed(self.load_and_process_chunk)(file_path, start_index, chunk_size, window_size)
+            lazy_results.append(lazy_result)
 
-    def plot_features(self, feature_names: List[str], channel_start: int = 0, channel_end: Optional[int] = None,
-                      time_start: float = 0, time_end: Optional[float] = None, figsize: Tuple[int, int] = (16, 6)):
-        if not feature_names:
-            raise ValueError("No features specified for plotting.")
+        return lazy_results
 
-        for feature_name in feature_names:
-            if feature_name not in self.extracted_features:
-                raise ValueError(f"Feature '{feature_name}' not found. Extract it first.")
+    def plot_features(self, feature_names: List[str], results: List[Dict[str, np.ndarray]],
+                      channel_start: int = 0, channel_end: Optional[int] = None,
+                      time_start: float = 0, time_end: Optional[float] = None,
+                      figsize: Tuple[int, int] = (16, 6)):
+        # Combine results from all chunks
+        combined_features = {name: np.concatenate([r[name] for r in results], axis=0) for name in feature_names}
 
-        # Get the shape of the first feature to determine available data
-        first_feature = next(iter(self.extracted_features.values()))
-        max_time, max_channels = first_feature.shape
+        max_time, max_channels = next(iter(combined_features.values())).shape
 
-        # Convert time to indices
-        time_start_idx = int(time_start / self.preprocessor.window_size)
-        time_end_idx = int(time_end / self.preprocessor.window_size) if time_end is not None else max_time
-
-        # Ensure we don't exceed available data
+        time_end_idx = int(time_end * 4) if time_end is not None else max_time  # Assuming 0.25s windows
         time_end_idx = min(time_end_idx, max_time)
 
         if channel_end is None:
@@ -223,63 +141,61 @@ class DAS:
 
         channel_start = max(0, min(channel_start, channel_end - 1))
 
-        # Calculate actual time range
-        actual_time_start = time_start_idx * self.preprocessor.window_size
-        actual_time_end = time_end_idx * self.preprocessor.window_size
-
-        # Create subplots
         n_features = len(feature_names)
         fig, axes = plt.subplots(1, n_features, figsize=figsize, sharey=True)
         if n_features == 1:
-            axes = [axes]  # Make axes iterable for single subplot
+            axes = [axes]
 
         for ax, feature_name in zip(axes, feature_names):
-            feature_data = self.extracted_features[feature_name]
-            plot_data = feature_data[time_start_idx:time_end_idx, channel_start:channel_end]
+            feature_data = combined_features[feature_name]
+            plot_data = feature_data[int(time_start * 4):time_end_idx, channel_start:channel_end]
 
             im = ax.imshow(plot_data.T, aspect='auto', origin='lower', cmap='viridis',
-                           extent=[actual_time_start, actual_time_end, channel_start, channel_end])
+                           extent=[time_start, time_end_idx / 4, channel_start, channel_end])
 
             ax.set_title(f'{feature_name.capitalize()}')
             ax.set_xlabel('Time (s)')
 
-            # Add colorbar
             cbar = fig.colorbar(im, ax=ax)
             cbar.set_label(feature_name.capitalize())
 
-        # Set common y-label
         fig.text(0.04, 0.5, 'Channel', va='center', rotation='vertical')
-
         plt.tight_layout()
         plt.show()
 
 
 # Example usage
-
 if __name__ == "__main__":
-    path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/0000000005_2024-07-03_09.30.30.84400.hdf5'
+    # file_path = '/Users/jamesramsay/Downloads/OneDrive_1_09-07-2024/0000000005_2024-07-03_09.30.30.84400.hdf5'
+    file_path = '/Users/jamesramsay/Downloads/0000028222_2023-09-15_07.43.24.54298.hdf5'
+    chunk_size = 2500  # Adjust based on your memory constraints
     window_size = 0.25  # 250 ms window
 
     das = DAS()
-    das.load_raw_data(path)
-    das.preprocess(window_size=window_size)
 
-    fbe_extractor = FBEExtractor()
-    das.extract_features(fbe_extractor, window_size=window_size)
+    # Set up the Dask client
+    client = Client(threads_per_worker=2, n_workers=8)
+    print(client)
+    print(client.dashboard_link)
 
-    das.print_timings()
+    # Process the file in parallel
+    lazy_results = das.process_file(file_path, chunk_size, window_size)
+    futures = client.persist(lazy_results)
+    progress(futures)  # This will display a progress bar
+    results = client.compute(futures, sync=True)
 
-    print("\nFeatures extracted successfully.")
-    print("Available features:", list(das.extracted_features.keys()))
-    for feature, data in das.extracted_features.items():
-        print(f"{feature} shape:", data.shape)
+    print("Features extracted successfully.")
+    print("Number of chunks processed:", len(results))
 
     # Plot the FBE features
     das.plot_features(
         ['fbe_4_8', 'fbe_8_20', 'fbe_20_48', 'fbe_48_100'],
+        results,
         channel_start=0,
-        channel_end=400,
+        channel_end=2000,
         time_start=0,
-        time_end=120,
+        time_end=300,
         figsize=(16, 4)
     )
+
+    client.close()
