@@ -1,4 +1,4 @@
-pyiceberg[s3fs,s3]
+#pyiceberg[s3fs,s3]
 pandas
 minio
 pyarrow
@@ -6,3 +6,4 @@ numpy
 h5py
 scipy
 matplotlib
+dask[complete]
